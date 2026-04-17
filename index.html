@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Jellyfish Merge — Морские медузы</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:100%; height:100%; overflow:hidden; background:#04111e; font-family:Arial,sans-serif; }
+canvas { display:block; cursor:crosshair; }
+
+/* Persistent corner task box */
+#task-box {
+  position:fixed; top:12px; right:12px;
+  background:rgba(0,40,55,0.90); border:1px solid rgba(0,220,200,0.5);
+  border-radius:12px; padding:10px 14px; color:#7ef5ee;
+  font-size:13px; max-width:210px; z-index:10; pointer-events:none;
+  transition: opacity 0.6s;
+}
+#task-box h3 { color:#00e5d4; margin-bottom:6px; font-size:14px; }
+.task-item { display:flex; align-items:center; gap:8px; margin:5px 0; }
+.task-dot { width:13px; height:13px; border-radius:50%; background:#0d5; flex-shrink:0; }
+.task-dot.pending { background:#334; }
+
+/* Round start modal */
+#round-modal {
+  position:fixed; inset:0; z-index:30;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(0,15,25,0.78); backdrop-filter:blur(4px);
+}
+#round-card {
+  background:rgba(0,45,60,0.97); border:2px solid rgba(0,220,200,0.6);
+  border-radius:18px; padding:28px 36px; text-align:center;
+  min-width:280px; max-width:360px;
+  box-shadow:0 0 40px rgba(0,200,180,0.2);
+}
+#round-card h2 { color:#00e5d4; font-size:22px; margin-bottom:4px; }
+#round-card .subtitle { color:rgba(150,240,230,0.65); font-size:13px; margin-bottom:20px; }
+#round-card .task-preview { margin:8px 0; display:flex; align-items:center; gap:10px; }
+#round-card .task-preview span { color:#a0f0e8; font-size:15px; }
+.jelly-preview { display:inline-block; width:36px; height:24px; border-radius:50% 50% 0 0; border:2px solid; margin-right:4px; vertical-align:middle; }
+#start-btn {
+  margin-top:22px; background:rgba(0,180,160,0.18);
+  border:2px solid #00e5d4; color:#00e5d4;
+  padding:10px 34px; font-size:16px; border-radius:24px;
+  cursor:pointer; transition:background 0.2s;
+}
+#start-btn:hover { background:rgba(0,180,160,0.35); }
+
+#score-box { position:fixed; top:12px; left:12px; color:#7ef5ee; font-size:18px; font-weight:bold; text-shadow:0 0 10px #0dc; z-index:10; }
+#level-indicator { position:fixed; bottom:12px; left:12px; color:#4ec; font-size:13px; z-index:10; }
+#msg { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); color:#fff; font-size:26px; font-weight:bold; text-shadow:0 0 20px #0dc; opacity:0; transition:opacity 0.5s; pointer-events:none; text-align:center; z-index:20; white-space:nowrap; }
+#next-btn { position:fixed; top:33vh; left:50%; transform:translateX(-50%); background:rgba(0,100,90,0.4); border:2px solid #0dc; color:#7ef; padding:12px 32px; font-size:16px; border-radius:24px; cursor:pointer; display:none; z-index:20; }
+#next-btn:hover { background:rgba(0,140,120,0.5); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<!-- Persistent corner task box -->
+<div id="task-box"><h3>Задания</h3><div id="tasks"></div></div>
+
+<!-- Round start modal -->
+<div id="round-modal">
+  <div id="round-card">
+    <h2 id="modal-title">Раунд 1</h2>
+    <div class="subtitle">Выполни задания чтобы перейти дальше</div>
+    <div id="modal-tasks"></div>
+    <button id="start-btn" onclick="startRound()">Понял! ▶</button>
+  </div>
+</div>
+
+<div id="score-box">Счёт: <span id="score">0</span></div>
+<div id="level-indicator">Раунд: <span id="round-num">1</span></div>
+<div id="msg"></div>
+<button id="next-btn" onclick="nextRound()">Следующий раунд ▶</button>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W,H,BOARD_X,BOARD_W,BOARD_Y,BOARD_H,BOARD_R;
+
+function resize(){
+  W=canvas.width=window.innerWidth; H=canvas.height=window.innerHeight;
+  BOARD_W=Math.min(460,W-40); BOARD_X=W/2-BOARD_W/2;
+  BOARD_Y=70; BOARD_H=H-90; BOARD_R=W/2;
+  makeDecorations();
+}
+window.addEventListener('resize',resize);
+
+const JELLY_COLORS=[
+  {body:'rgba(200,235,255,0.22)',tentacle:'rgba(180,225,255,0.28)',glow:'rgba(180,255,255,0.10)',tentacles:3},
+  {body:'rgba(170,220,255,0.32)',tentacle:'rgba(150,205,255,0.38)',glow:'rgba(160,230,255,0.16)',tentacles:3},
+  {body:'rgba(130,200,255,0.42)',tentacle:'rgba(110,185,255,0.48)',glow:'rgba(130,215,255,0.20)',tentacles:4},
+  {body:'rgba(60,185,255,0.52)',tentacle:'rgba(40,165,255,0.58)',glow:'rgba(60,200,255,0.26)',tentacles:5},
+  {body:'rgba(40,215,185,0.58)',tentacle:'rgba(20,195,165,0.63)',glow:'rgba(40,225,195,0.31)',tentacles:5},
+  {body:'rgba(60,250,165,0.63)',tentacle:'rgba(40,230,145,0.68)',glow:'rgba(60,250,175,0.36)',tentacles:6},
+  {body:'rgba(160,250,75,0.68)',tentacle:'rgba(140,230,55,0.73)',glow:'rgba(160,250,85,0.40)',tentacles:7},
+  {body:'rgba(255,230,55,0.70)',tentacle:'rgba(235,210,35,0.75)',glow:'rgba(255,235,65,0.41)',tentacles:8},
+  {body:'rgba(255,185,45,0.73)',tentacle:'rgba(235,165,25,0.78)',glow:'rgba(255,195,55,0.45)',tentacles:9},
+  {body:'rgba(255,135,45,0.76)',tentacle:'rgba(235,115,25,0.81)',glow:'rgba(255,145,55,0.48)',tentacles:10},
+  {body:'rgba(255,75,65,0.80)',tentacle:'rgba(235,55,45,0.85)',glow:'rgba(255,85,75,0.51)',tentacles:11},
+  {body:'rgba(205,45,165,0.83)',tentacle:'rgba(185,25,145,0.88)',glow:'rgba(215,55,175,0.54)',tentacles:12},
+  {body:'rgba(165,45,250,0.86)',tentacle:'rgba(145,25,230,0.91)',glow:'rgba(175,55,250,0.56)',tentacles:13},
+  {body:'rgba(250,65,205,0.88)',tentacle:'rgba(230,45,185,0.93)',glow:'rgba(250,75,215,0.61)',tentacles:14},
+  {body:'rgba(255,210,255,0.94)',tentacle:'rgba(255,165,255,1.0)',glow:'rgba(255,220,255,0.70)',tentacles:15},
+];
+
+const ROUNDS=[
+  [{level:7,count:1,label:'Медуза 7-го уровня'}],
+  [{level:9,count:1,label:'Медуза 9-го уровня'}],
+  [{level:6,count:1,label:'Медуза 6-го уровня'},{level:9,count:1,label:'Медуза 9-го уровня'}],
+  [{level:10,count:1,label:'Медуза 10-го уровня'},{level:5,count:2,label:'2 медузы 5-го уровня'}],
+  [{level:12,count:1,label:'Медуза 12-го уровня'}],
+  [{level:8,count:3,label:'3 медузы 8-го уровня'}],
+  [{level:15,count:1,label:'Медуза 15-го уровня!'}],
+];
+
+// Sizes: lower levels get extra boost — all bigger
+function jellyRx(l){
+  const base=(22+l*6.2)*1.1;
+  const boost=[1.32,1.15,1.0][l]||1.0;
+  return base*boost;
+}
+// Collider: tall dome top, VERY flat bottom (almost no bottom protrusion)
+// This means jellies stack like plates — upper one sits on dome of lower one
+function jellyRyTop(l){ return jellyRx(l)*0.62; }  // tall dome above center
+function jellyRyBot(l){ return jellyRx(l)*0.06; }  // almost zero below center = flat base
+function jellyRy(l){ return jellyRyTop(l); }
+function jellyFloorOff(l){ return jellyRyBot(l)+jellyRx(l)*1.0; }
+
+// Flat-bottom ellipse overlap.
+// Upper half: ellipse with ryTop. Lower half: nearly flat (ryBot).
+// Critical: Y compression is extreme so dome-top contacts push VERTICALLY.
+function flatEllipseOverlap(ax,ay,arxA,rytA,rybA, bx,by,arxB,rytB,rybB){
+  const dx=ax-bx, dy=ay-by;
+  // A sits above B (dy<0): A's bottom (rybA) meets B's top (rytB)
+  // A sits below B (dy>0): A's top (rytA) meets B's bottom (rybB)
+  const ryA = dy>=0 ? rytA : rybA;
+  const ryB = dy<=0 ? rytB : rybB;
+  const avgRx=(arxA+arxB)/2;
+  const avgRy=(ryA+ryB)/2;
+  // Compress Y very strongly — makes normal near-vertical for dome contacts
+  const yScale=0.35;
+  const sx=dx/avgRx, sy=dy/(avgRy/yScale);
+  const sd=Math.sqrt(sx*sx+sy*sy);
+  if(sd>=2.0) return null;
+  const penetration=(2.0-sd)*0.5;
+  const nx=sx/sd, ny=sy/sd;
+  return {penetration, nx, ny, avgRx, avgRy};
+}
+
+let jellies=[],score=0,roundNum=1,nextJelly=null;
+let dragging=false,dragX=0,dragY=0;
+let tasksDone=false,escaped=[],particles=[],decorations=[],scoreTexts=[];
+let waveT=0,currentTasks=[];
+let roundStarting=true;
+
+// Danger line: round 1 = 30% from top, round 2 = 33%, round 3 = 36%, then +1% each round
+let dangerAnimFrom=null, dangerAnimTo=null, dangerAnimT=0; // animation state
+const DANGER_ANIM_DUR=1400; // ms for drop animation
+
+function getDangerFrac(rn){
+  rn=rn||roundNum;
+  if(rn===1) return 0.30;
+  if(rn===2) return 0.33;
+  if(rn===3) return 0.36;
+  return Math.min(0.65, 0.36+(rn-3)*0.01);
+}
+
+// Returns current animated danger Y position
+function getDangerY(){
+  if(dangerAnimFrom!==null && dangerAnimT<DANGER_ANIM_DUR){
+    const p=dangerAnimT/DANGER_ANIM_DUR;
+    const ease=1-Math.pow(1-p,3); // ease-out cubic
+    const frac=dangerAnimFrom+(dangerAnimTo-dangerAnimFrom)*ease;
+    return BOARD_Y+BOARD_H*frac;
+  }
+  return BOARD_Y+BOARD_H*getDangerFrac();
+}
+
+let overflowTimer=null, overflowWarning=false;
+
+// Ammo bar: max 7 shots, recharges over 4.2s total
+const AMMO_MAX=7;
+const AMMO_RECHARGE_MS=4200;
+let ammo=AMMO_MAX;
+let ammoRechargeTimer=null;
+
+function makeDecorations(){
+  decorations=[];
+  for(let i=0;i<14;i++){
+    decorations.push({type:'seaweed',x:BOARD_X-14-Math.random()*55,y:BOARD_Y+BOARD_H-8,h:55+Math.random()*95,phase:Math.random()*Math.PI*2,color:`hsl(${155+Math.random()*30},50%,${20+Math.random()*12}%)`});
+    decorations.push({type:'seaweed',x:BOARD_X+BOARD_W+8+Math.random()*55,y:BOARD_Y+BOARD_H-8,h:55+Math.random()*95,phase:Math.random()*Math.PI*2,color:`hsl(${155+Math.random()*30},50%,${20+Math.random()*12}%)`});
+  }
+  for(let i=0;i<6;i++){
+    const side=i%2===0;
+    const x=side?BOARD_X-14-Math.random()*55:BOARD_X+BOARD_W+14+Math.random()*55;
+    decorations.push({type:'starfish',x,y:BOARD_Y+BOARD_H-22+Math.random()*32,r:7+Math.random()*10,color:`hsl(${18+Math.random()*25},82%,52%)`,rot:Math.random()*Math.PI*2});
+  }
+  for(let i=0;i<3;i++){
+    const lW=Math.max(10,BOARD_X-6);
+    decorations.push({type:'fish',lane:0,x:Math.random()*lW,y:BOARD_Y+30+Math.random()*(BOARD_H-60),speed:(0.5+Math.random())*(Math.random()>0.5?1:-1),color:`hsl(${Math.random()*360},65%,58%)`,size:9+Math.random()*12,phase:Math.random()*Math.PI*2});
+  }
+  for(let i=0;i<3;i++){
+    const lS=BOARD_X+BOARD_W+6,lW=Math.max(10,W-lS);
+    decorations.push({type:'fish',lane:1,x:lS+Math.random()*lW,y:BOARD_Y+30+Math.random()*(BOARD_H-60),speed:(0.5+Math.random())*(Math.random()>0.5?1:-1),color:`hsl(${Math.random()*360},65%,58%)`,size:9+Math.random()*12,phase:Math.random()*Math.PI*2});
+  }
+}
+
+function makeNextJelly(){
+  const r=Math.random();
+  const lvl=r<0.70?0:r<0.95?1:2;
+  nextJelly={level:lvl,rx:jellyRx(lvl),ry:jellyRy(lvl),wobble:0,wobbleV:0,alpha:1,escaping:false};
+}
+
+function getRoundTasks(){ return JSON.parse(JSON.stringify(ROUNDS[(roundNum-1)%ROUNDS.length])); }
+
+function showRoundModal(){
+  roundStarting=true;
+  const modal=document.getElementById('round-modal');
+  modal.style.display='flex';
+  document.getElementById('modal-title').textContent=`Раунд ${roundNum}`;
+  const mt=document.getElementById('modal-tasks');
+  mt.innerHTML='';
+  const tasks=getRoundTasks();
+  tasks.forEach(t=>{
+    const c=JELLY_COLORS[t.level-1];
+    const div=document.createElement('div'); div.className='task-preview';
+    // small color swatch
+    const swatch=document.createElement('span');
+    swatch.style.cssText=`display:inline-block;width:22px;height:14px;border-radius:50% 50% 0 0;background:${c.body};border:1px solid ${c.tentacle};flex-shrink:0;`;
+    const lbl=document.createElement('span'); lbl.textContent=t.label;
+    div.appendChild(swatch); div.appendChild(lbl);
+    mt.appendChild(div);
+  });
+}
+
+function startRound(){
+  document.getElementById('round-modal').style.display='none';
+  roundStarting=false;
+}
+
+function initRound(){
+  jellies=[]; escaped=[]; particles=[]; scoreTexts=[]; tasksDone=false;
+  overflowWarning=false; if(overflowTimer){clearTimeout(overflowTimer);overflowTimer=null;}
+  ammo=AMMO_MAX; if(ammoRechargeTimer){clearInterval(ammoRechargeTimer);ammoRechargeTimer=null;}
+  currentTasks=getRoundTasks(); makeNextJelly();
+
+  // From round 4: spawn one bonus jelly (level 5-8) capped by highest task level
+  if(roundNum>=4){
+    const maxTaskLevel=Math.max(...currentTasks.map(t=>t.level)); // task levels are 1-indexed
+    // Bonus jelly: random level 4 or 5
+    const bonusLevel=Math.random()<0.5?4:5;
+    const lvl=bonusLevel-1;
+    const rx=jellyRx(lvl), ry=jellyRy(lvl);
+    const floorY=BOARD_Y+BOARD_H-jellyFloorOff(lvl);
+    const x=BOARD_X+rx+(Math.random()*(BOARD_W-rx*2));
+    jellies.push({level:lvl,x,y:floorY-jellyRyBot(lvl),rx,ry,vx:0,vy:0,wobble:0,wobbleV:0,energy:0,escaping:false,alpha:1});
+  }
+
+  document.getElementById('next-btn').style.display='none';
+  document.getElementById('msg').style.opacity=0;
+  document.getElementById('round-num').textContent=roundNum;
+  updateTaskUI();
+  showRoundModal();
+}
+
+function nextRound(){
+  // Animate danger line dropping to new position
+  dangerAnimFrom=getDangerFrac(roundNum);
+  roundNum++;
+  dangerAnimTo=getDangerFrac(roundNum);
+  dangerAnimT=0;
+  initRound();
+}
+
+function updateTaskUI(){
+  const el=document.getElementById('tasks'); el.innerHTML='';
+  currentTasks.forEach(t=>{
+    const prog=getTaskProgress(t),done=prog>=t.count;
+    const div=document.createElement('div'); div.className='task-item';
+    div.innerHTML=`<span class="task-dot ${done?'':'pending'}"></span><span style="color:${done?'#0f9':'#9ee'}">${t.label} (${prog}/${t.count})</span>`;
+    el.appendChild(div);
+  });
+}
+
+function getTaskProgress(task){
+  let c=jellies.filter(j=>j.level===task.level-1&&!j.escaping).length;
+  c+=escaped.filter(e=>e.level===task.level-1).length;
+  return c;
+}
+
+function checkTasks(){
+  if(tasksDone) return;
+  if(currentTasks.every(t=>getTaskProgress(t)>=t.count)){
+    tasksDone=true;
+    currentTasks.forEach(task=>{
+      jellies.filter(j=>j.level===task.level-1&&!j.escaping).forEach(j=>{j.escaping=true;j.vy=-3;j.vx=(Math.random()-0.5)*2;});
+    });
+    setTimeout(()=>{
+      showMsg('Все задания выполнены! +500',2500);
+      score+=500; document.getElementById('score').textContent=score;
+      setTimeout(()=>{ document.getElementById('next-btn').style.display='block'; },1500);
+    },800);
+  }
+}
+
+function showMsg(text,dur){
+  const el=document.getElementById('msg'); el.textContent=text; el.style.opacity=1;
+  setTimeout(()=>{ el.style.opacity=0; },dur);
+}
+
+function spawnParticles(x,y,color,n=14){
+  for(let i=0;i<n;i++){const a=Math.random()*Math.PI*2,spd=1.5+Math.random()*3; particles.push({x,y,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,life:1,color,r:2+Math.random()*3});}
+}
+
+// ---- DRAW ----
+function drawBg(){
+  // Deep teal ocean background
+  ctx.fillStyle='#04111e'; ctx.fillRect(0,0,W,H);
+  const g=ctx.createLinearGradient(BOARD_X,BOARD_Y,BOARD_X,BOARD_Y+BOARD_H);
+  g.addColorStop(0,'rgba(0,70,80,0.88)');
+  g.addColorStop(0.5,'rgba(0,50,65,0.92)');
+  g.addColorStop(1,'rgba(0,30,40,0.97)');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.roundRect(BOARD_X,BOARD_Y,BOARD_W,BOARD_H,12); ctx.fill();
+  // Teal border glow
+  ctx.strokeStyle='rgba(0,220,200,0.55)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.roundRect(BOARD_X,BOARD_Y,BOARD_W,BOARD_H,12); ctx.stroke();
+  // Shimmer lines — teal tint
+  ctx.strokeStyle='rgba(0,200,180,0.04)'; ctx.lineWidth=1;
+  for(let i=0;i<12;i++){
+    const y=BOARD_Y+((i/12)*BOARD_H+waveT*14*(i*0.5+1))%BOARD_H;
+    ctx.beginPath(); ctx.moveTo(BOARD_X,y); ctx.lineTo(BOARD_X+BOARD_W,y); ctx.stroke();
+  }
+}
+
+function drawSeaweed(d){
+  const seg=Math.ceil(d.h/12),sw=Math.sin(waveT*1.1+d.phase)*9;
+  ctx.strokeStyle=d.color; ctx.lineWidth=5; ctx.lineCap='round';
+  ctx.beginPath();
+  for(let i=0;i<=seg;i++){const p=i/seg,sway=Math.sin(waveT+d.phase+p*3)*sw*p; i===0?ctx.moveTo(d.x,d.y):ctx.lineTo(d.x+sway,d.y-i*12);}
+  ctx.stroke(); ctx.lineWidth=2.5;
+  for(let i=1;i<=seg;i+=2){const p=i/seg,sway=Math.sin(waveT+d.phase+p*3)*sw*p,lx=d.x+sway,ly=d.y-i*12;
+    ctx.beginPath(); ctx.ellipse(lx+7,ly,7,3.5,Math.sin(waveT+i)*0.3,0,Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(lx-7,ly,7,3.5,-Math.sin(waveT+i)*0.3,0,Math.PI*2); ctx.stroke();}
+}
+
+function drawStarfish(d){
+  ctx.save(); ctx.translate(d.x,d.y); ctx.rotate(d.rot+waveT*0.08);
+  ctx.fillStyle=d.color; ctx.beginPath();
+  for(let i=0;i<5;i++){const a=(i/5)*Math.PI*2-Math.PI/2,a2=a+Math.PI/5; ctx.lineTo(Math.cos(a)*d.r,Math.sin(a)*d.r); ctx.lineTo(Math.cos(a2)*d.r*0.42,Math.sin(a2)*d.r*0.42);}
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+
+function updateFish(d){
+  d.x+=d.speed*0.9; d.y+=Math.sin(waveT*1.3+d.phase)*0.4;
+  if(d.lane===0){
+    if(d.x>BOARD_X-5){d.x=BOARD_X-5;d.speed=-Math.abs(d.speed);}
+    if(d.x<d.size){d.x=d.size;d.speed=Math.abs(d.speed);}
+  } else {
+    if(d.x<BOARD_X+BOARD_W+5){d.x=BOARD_X+BOARD_W+5;d.speed=Math.abs(d.speed);}
+    if(d.x>W-d.size){d.x=W-d.size;d.speed=-Math.abs(d.speed);}
+  }
+  if(d.y<BOARD_Y+15) d.y=BOARD_Y+15;
+  if(d.y>BOARD_Y+BOARD_H-15) d.y=BOARD_Y+BOARD_H-15;
+}
+
+function drawFish(d){
+  const dir=d.speed>0?1:-1;
+  ctx.save(); ctx.translate(d.x,d.y); ctx.scale(dir,1);
+  ctx.fillStyle=d.color;
+  ctx.beginPath(); ctx.ellipse(0,0,d.size,d.size*0.48,0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-d.size,0); ctx.lineTo(-d.size-d.size*0.65,-d.size*0.38); ctx.lineTo(-d.size-d.size*0.65,d.size*0.38); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(d.size*0.38,-d.size*0.1,d.size*0.13,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(d.size*0.41,-d.size*0.1,d.size*0.06,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawJellyfish(j,ox,oy,alpha){
+  const c=JELLY_COLORS[j.level];
+  const rx=j.rx;
+  const ryTop=jellyRyTop(j.level);
+  const x=ox!==undefined?ox:j.x, y=oy!==undefined?oy:j.y;
+  const wobble=Math.sin(j.wobble)*0.045;
+  const a=alpha!==undefined?alpha:(j.alpha||1);
+  ctx.save(); ctx.globalAlpha=a;
+
+  // Subtle inner glow — only inside the dome, no external aura
+  const gg=ctx.createRadialGradient(x,y-ryTop*0.5,rx*0.05,x,y,rx*0.95);
+  gg.addColorStop(0,c.glow); gg.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=gg;
+  ctx.beginPath(); ctx.ellipse(x,y,rx*0.95,ryTop*0.95,0,Math.PI,0); ctx.closePath(); ctx.fill();
+
+  // Tentacles from flat base of dome
+  const nt=c.tentacles;
+  for(let i=0;i<nt;i++){
+    const ang=Math.PI+(i/(nt-1||1))*Math.PI;
+    const tx=x+Math.cos(ang)*rx*0.58, ty=y+ryTop*0.08;
+    const tlen=rx*(1.1+Math.sin(waveT+i*0.8)*0.18);
+    ctx.strokeStyle=c.tentacle; ctx.lineWidth=1.6; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(tx,ty);
+    ctx.bezierCurveTo(
+      tx+Math.sin(waveT+i)*rx*0.32, ty+tlen*0.3,
+      tx-Math.sin(waveT+i+1)*rx*0.32, ty+tlen*0.7,
+      tx+Math.sin(waveT*0.5+i)*rx*0.2, ty+tlen
+    );
+    ctx.stroke();
+  }
+
+  // Body — full round dome, taller and puffier
+  const domeRx=rx*(1+wobble);
+  const domeRy=ryTop*(1.0+wobble);
+  const bg=ctx.createRadialGradient(x-rx*0.25,y-ryTop*0.4,rx*0.05,x,y+ryTop*0.1,rx*1.1);
+  bg.addColorStop(0,c.body.replace(/[\d.]+\)$/,'0.95)'));
+  bg.addColorStop(0.5,c.body);
+  bg.addColorStop(1,c.tentacle);
+  ctx.fillStyle=bg;
+  ctx.beginPath();
+  ctx.ellipse(x, y, domeRx, domeRy, 0, Math.PI, 0);
+  ctx.closePath(); ctx.fill();
+
+  // Inner highlight for volume/depth
+  const hi=ctx.createRadialGradient(x-rx*0.28,y-ryTop*0.45,rx*0.04,x-rx*0.1,y-ryTop*0.2,rx*0.7);
+  hi.addColorStop(0,'rgba(255,255,255,0.22)'); hi.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle=hi;
+  ctx.beginPath(); ctx.ellipse(x,y,domeRx,domeRy,0,Math.PI,0); ctx.closePath(); ctx.fill();
+
+  // Rim frills
+  ctx.strokeStyle=c.tentacle; ctx.lineWidth=1.2;
+  for(let i=0;i<9;i++){
+    const ang=Math.PI+(i/8)*Math.PI;
+    ctx.beginPath(); ctx.arc(x+Math.cos(ang)*rx*0.92,y+Math.sin(ang)*ryTop*0.06,3,0,Math.PI*2); ctx.stroke();
+  }
+
+  // Level number
+  ctx.fillStyle=`rgba(255,255,255,${0.75*a})`;
+  ctx.font=`bold ${Math.max(11,rx*0.42)}px Arial`; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(j.level+1,x,y-ryTop*0.28);
+  ctx.restore();
+}
+
+function drawAimLine(){
+  if(!dragging||!nextJelly) return;
+  const sx=BOARD_R,sy=BOARD_Y-42;
+  const dx=dragX-sx,dy=dragY-sy,mag=Math.sqrt(dx*dx+dy*dy);
+  if(mag<8) return;
+  const nx=dx/mag,ny=dy/mag;
+  ctx.setLineDash([8,8]); ctx.strokeStyle='rgba(0,220,200,0.5)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(sx,sy);
+  for(let i=1;i<=12;i++) ctx.lineTo(sx+nx*i*28,sy+ny*i*28);
+  ctx.stroke(); ctx.setLineDash([]);
+}
+
+function drawParticles(){
+  particles.forEach(p=>{ctx.globalAlpha=p.life; ctx.fillStyle=p.color; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();}); ctx.globalAlpha=1;
+}
+function drawScoreTexts(){
+  scoreTexts.forEach(t=>{ctx.globalAlpha=Math.min(1,t.life); ctx.fillStyle='#ffe060'; ctx.font='bold 15px Arial'; ctx.textAlign='center'; ctx.fillText(t.text,t.x,t.y);}); ctx.globalAlpha=1;
+}
+
+// ---- PHYSICS ----
+// Each jelly has `energy` 0..1. Active shot jelly = 1.0.
+// When jelly hits another, transferred energy = collider.energy * 0.2 (1/5).
+// That jelly then passes energy*0.2 to next, etc — cascading damping.
+
+function physics(){
+  waveT+=0.011;
+  // Advance danger line animation (~16ms per frame at 60fps)
+  if(dangerAnimFrom!==null && dangerAnimT<DANGER_ANIM_DUR) dangerAnimT+=16;
+  decorations.forEach(d=>{ if(d.type==='fish') updateFish(d); });
+
+  jellies.forEach(j=>{
+    j.wobble+=j.wobbleV; j.wobbleV*=0.91; j.wobble*=0.94;
+    if(j.escaping){j.x+=j.vx; j.y+=j.vy; j.vy-=0.09; j.alpha-=0.013; return;}
+
+    // Energy decays over time
+    if(j.energy>0) j.energy=Math.max(0, j.energy-0.008);
+
+    j.vy+=0.20;
+    const e=j.energy||0;
+    j.x+=j.vx; j.y+=j.vy;
+    j.vx*=(e>0.3 ? 0.93 : 0.38);
+    j.vy*=0.97;
+
+    // Floor uses bottom ellipse radius + tentacle clearance
+    const ryBot=jellyRyBot(j.level);
+    const floorY=BOARD_Y+BOARD_H-jellyFloorOff(j.level);
+    if(j.x-j.rx<BOARD_X){j.x=BOARD_X+j.rx; j.vx=Math.abs(j.vx)*0.04; j.wobbleV=0.08;}
+    if(j.x+j.rx>BOARD_X+BOARD_W){j.x=BOARD_X+BOARD_W-j.rx; j.vx=-Math.abs(j.vx)*0.04; j.wobbleV=0.08;}
+    if(j.y+ryBot>floorY){
+      j.y=floorY-ryBot; j.vy*=-0.04;
+      j.vx*=0.08;
+      if(Math.abs(j.vy)<0.25){j.vy=0; j.energy=0;} j.wobbleV=0.12;
+    }
+    const ryTop=jellyRyTop(j.level);
+    if(j.y-ryTop<BOARD_Y){j.y=BOARD_Y+ryTop; j.vy=Math.abs(j.vy)*0.06;}
+
+    // Settle completely if barely moving and no energy
+    if(j.energy<0.01&&Math.abs(j.vx)<0.04) j.vx=0;
+    if(j.energy<0.01&&Math.abs(j.vy)<0.04) j.vy=0;
+
+    // Hard clamp — never leave board regardless of solver drift
+    j.x=Math.max(BOARD_X+j.rx, Math.min(BOARD_X+BOARD_W-j.rx, j.x));
+    const _floorClamp=BOARD_Y+BOARD_H-jellyFloorOff(j.level);
+    j.y=Math.max(BOARD_Y+jellyRyTop(j.level), Math.min(_floorClamp-jellyRyBot(j.level), j.y));
+  });
+
+  jellies=jellies.filter(j=>{
+    if(j.escaping&&(j.alpha<=0||j.y<BOARD_Y-120)){escaped.push({level:j.level}); return false;}
+    return true;
+  });
+
+  // Merge — flat-bottom ellipse overlap
+  let merged=false;
+  outer: for(let i=0;i<jellies.length;i++){
+    if(jellies[i].escaping) continue;
+    for(let k=i+1;k<jellies.length;k++){
+      if(jellies[k].escaping||jellies[i].level!==jellies[k].level) continue;
+      const ji=jellies[i],jk=jellies[k];
+      const col=flatEllipseOverlap(ji.x,ji.y,ji.rx,jellyRyTop(ji.level),jellyRyBot(ji.level),
+                                   jk.x,jk.y,jk.rx,jellyRyTop(jk.level),jellyRyBot(jk.level));
+      if(col){
+        const nl=Math.min(ji.level+1,14);
+        const mx=(ji.x+jk.x)/2,my=(ji.y+jk.y)/2;
+        const inheritE=Math.max(ji.energy,jk.energy)*0.3;
+        spawnParticles(mx,my,JELLY_COLORS[ji.level].body,16);
+        jellies.splice(k,1); jellies.splice(i,1);
+        const nrx=jellyRx(nl),nry=jellyRy(nl);
+        jellies.push({level:nl,x:mx,y:my,rx:nrx,ry:nry,vx:0,vy:-1.2,wobble:0,wobbleV:0.45,energy:inheritE,escaping:false,alpha:1});
+        score+=100*(nl+1); document.getElementById('score').textContent=score;
+        scoreTexts.push({x:mx,y:my,text:`+${100*(nl+1)}`,life:1.6,vy:-1.4});
+        merged=true; setTimeout(()=>{updateTaskUI();checkTasks();},80);
+        break outer;
+      }
+    }
+  }
+
+  // Flat-bottom ellipse separation + strong friction + energy transfer
+  for(let it=0;it<8;it++){
+    for(let i=0;i<jellies.length;i++){
+      if(jellies[i].escaping) continue;
+      for(let k=i+1;k<jellies.length;k++){
+        if(jellies[k].escaping) continue;
+        const ai=jellies[i],ak=jellies[k];
+        const col=flatEllipseOverlap(ai.x,ai.y,ai.rx,jellyRyTop(ai.level),jellyRyBot(ai.level),
+                                     ak.x,ak.y,ak.rx,jellyRyTop(ak.level),jellyRyBot(ak.level));
+        if(!col) continue;
+
+        const {penetration,nx,ny,avgRx,avgRy}=col;
+        const ei=ai.energy||0, ek=ak.energy||0;
+        const totalE=ei+ek+0.001;
+        const iShare=ei/totalE;
+
+        // Very gentle position nudge — only 8% per iteration, spread over 8 iters
+        // This lets jellies overlap naturally and drift apart slowly like real jellyfish
+        const posFactor=0.08;
+        ai.x+=nx*penetration*avgRx*posFactor*(1-iShare);
+        ai.y+=ny*penetration*avgRy*posFactor*(1-iShare);
+        ak.x-=nx*penetration*avgRx*posFactor*iShare;
+        ak.y-=ny*penetration*avgRy*posFactor*iShare;
+
+        // Soft velocity impulse — pushes them apart gradually, not instantly
+        const dvx=ai.vx-ak.vx, dvy=ai.vy-ak.vy;
+        const dvNorm=dvx*nx+dvy*ny;
+        if(dvNorm<0){
+          // Very low restitution — almost no bounce, just gentle separation
+          const softImpulse=dvNorm*0.06*(1+penetration*0.3);
+          ai.vx-=softImpulse*nx*(1-iShare); ai.vy-=softImpulse*ny*(1-iShare);
+          ak.vx+=softImpulse*nx*iShare;     ak.vy+=softImpulse*ny*iShare;
+        }
+
+        // Friction on tangential sliding
+        const tx=-ny, ty=nx;
+        const dvTan=dvx*tx+dvy*ty;
+        const avgE=(ei+ek)*0.5;
+        const frict=0.99-avgE*0.34;
+        const jt=dvTan*frict;
+        ai.vx-=jt*tx*0.5; ai.vy-=jt*ty*0.5;
+        ak.vx+=jt*tx*0.5; ak.vy+=jt*ty*0.5;
+
+        // Energy cascade 1/5
+        if(ei>ek+0.05){
+          const tr=ei*0.2;
+          ak.vx-=nx*tr*0.8; ak.vy-=ny*tr*0.8;
+          ak.energy=Math.max(ak.energy,ei*0.2);
+        } else if(ek>ei+0.05){
+          const tr=ek*0.2;
+          ai.vx+=nx*tr*0.8; ai.vy+=ny*tr*0.8;
+          ai.energy=Math.max(ai.energy,ek*0.2);
+        }
+      }
+    }
+  }
+
+  // Hard clamp after solver — solver pushes must never escape board
+  jellies.forEach(j=>{
+    if(j.escaping) return;
+    j.x=Math.max(BOARD_X+j.rx, Math.min(BOARD_X+BOARD_W-j.rx, j.x));
+    const fc=BOARD_Y+BOARD_H-jellyFloorOff(j.level);
+    j.y=Math.max(BOARD_Y+jellyRyTop(j.level), Math.min(fc-jellyRyBot(j.level), j.y));
+  });
+
+  particles.forEach(p=>{p.x+=p.vx; p.y+=p.vy; p.vy+=0.05; p.life-=0.027;}); particles=particles.filter(p=>p.life>0);
+  scoreTexts.forEach(t=>{t.y+=t.vy; t.life-=0.024;}); scoreTexts=scoreTexts.filter(t=>t.life>0);
+
+  // Overflow check: if any settled jelly is above danger line for 3s → reset level
+  if(!tasksDone&&!roundStarting){
+    const dangerY=getDangerY();
+    const anyAbove=jellies.some(j=>!j.escaping&&j.energy<0.05&&(j.y-j.ry)<dangerY);
+    if(anyAbove){
+      if(!overflowTimer){
+        overflowWarning=true;
+        overflowTimer=setTimeout(()=>{
+          // Check again after 3s — if still overflowing, reset level
+          const stillAbove=jellies.some(j=>!j.escaping&&j.energy<0.05&&(j.y-j.ry)<dangerY);
+          if(stillAbove) resetLevel();
+          else { overflowWarning=false; overflowTimer=null; }
+        },3000);
+      }
+    } else {
+      if(overflowTimer){ clearTimeout(overflowTimer); overflowTimer=null; }
+      overflowWarning=false;
+    }
+  }
+}
+
+function resetLevel(){
+  overflowTimer=null; overflowWarning=false;
+  // Fade out all jellies then restart
+  jellies.forEach(j=>{ j.escaping=true; j.vy=-(1+Math.random()*2); j.vx=(Math.random()-0.5)*3; });
+  setTimeout(()=>{
+    jellies=[]; escaped=[]; particles=[]; scoreTexts=[]; tasksDone=false;
+    // Keep same tasks, same round
+    currentTasks=getRoundTasks(); makeNextJelly();
+    showMsg('Переполнено! Начинаем заново',2200);
+  },900);
+}
+
+function drawDangerLine(){
+  const dangerY=getDangerY();
+  const isAnimating=dangerAnimFrom!==null && dangerAnimT<DANGER_ANIM_DUR;
+  const pulse=overflowWarning ? (0.5+0.5*Math.sin(waveT*8)) : 0.42;
+
+  // Shake offset during animation — decays as animation progresses
+  let shakeX=0;
+  if(isAnimating){
+    const shakeMag=6*(1-dangerAnimT/DANGER_ANIM_DUR);
+    shakeX=Math.sin(dangerAnimT*0.25)*shakeMag;
+  }
+
+  ctx.save();
+  ctx.strokeStyle=isAnimating
+    ? `rgba(80,220,255,${0.7+0.3*Math.sin(dangerAnimT*0.04)})`
+    : `rgba(255,${overflowWarning?80:180},${overflowWarning?80:100},${pulse})`;
+  ctx.lineWidth=isAnimating ? 2.5 : (overflowWarning?2.5:1.5);
+  ctx.setLineDash([10,7]);
+  ctx.beginPath();
+  ctx.moveTo(BOARD_X+6+shakeX, dangerY);
+  ctx.lineTo(BOARD_X+BOARD_W-6+shakeX, dangerY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Label
+  ctx.fillStyle=isAnimating
+    ? `rgba(80,220,255,0.9)`
+    : `rgba(255,${overflowWarning?80:180},${overflowWarning?80:100},${pulse})`;
+  ctx.font=`${overflowWarning||isAnimating?'bold ':''} 11px Arial`; ctx.textAlign='right';
+  ctx.fillText(
+    overflowWarning?'⚠ Опасно!': isAnimating?'↓ лимит':'лимит',
+    BOARD_X+BOARD_W-8+shakeX, dangerY-5
+  );
+  ctx.restore();
+}
+
+function drawAmmoBar(){
+  const barW=120, barH=14;
+  const bx=BOARD_R-barW/2, by=BOARD_Y-22;
+  const frac=ammo/AMMO_MAX;
+
+  // Track background
+  ctx.save();
+  ctx.fillStyle='rgba(0,20,30,0.7)';
+  ctx.beginPath(); ctx.roundRect(bx,by,barW,barH,7); ctx.fill();
+
+  // Fill — green→red based on ammo level
+  const r=Math.round(255*(1-frac)), g=Math.round(220*frac);
+  const fillW=Math.max(0,barW*frac);
+  if(fillW>0){
+    ctx.fillStyle=`rgb(${r},${g},40)`;
+    ctx.beginPath(); ctx.roundRect(bx,by,fillW,barH,7); ctx.fill();
+    // Shine
+    ctx.fillStyle='rgba(255,255,255,0.12)';
+    ctx.beginPath(); ctx.roundRect(bx+2,by+2,fillW-4,barH*0.4,4); ctx.fill();
+  }
+
+  // Border
+  ctx.strokeStyle='rgba(0,200,180,0.45)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(bx,by,barW,barH,7); ctx.stroke();
+
+  // Tick marks for each shot slot
+  for(let i=1;i<AMMO_MAX;i++){
+    const tx=bx+barW*(i/AMMO_MAX);
+    ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(tx,by+2); ctx.lineTo(tx,by+barH-2); ctx.stroke();
+  }
+
+  // Empty flash when ammo=0
+  if(ammo===0){
+    const flashA=0.4+0.4*Math.sin(waveT*10);
+    ctx.fillStyle=`rgba(255,60,60,${flashA})`;
+    ctx.beginPath(); ctx.roundRect(bx,by,barW,barH,7); ctx.fill();
+    ctx.fillStyle=`rgba(255,255,255,${flashA*0.8})`;
+    ctx.font='bold 9px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('ПЕРЕЗАРЯДКА',BOARD_R,by+barH/2);
+  }
+  ctx.restore();
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  drawBg();
+  decorations.forEach(d=>{
+    if(d.type==='seaweed') drawSeaweed(d);
+    else if(d.type==='starfish') drawStarfish(d);
+    else if(d.type==='fish') drawFish(d);
+  });
+  drawAimLine();
+  ctx.save();
+  ctx.beginPath(); ctx.roundRect(BOARD_X,BOARD_Y,BOARD_W,BOARD_H,12); ctx.clip();
+  drawDangerLine();
+  jellies.forEach(j=>drawJellyfish(j));
+  drawParticles();
+  ctx.restore();
+
+  if(nextJelly&&!tasksDone&&!roundStarting){
+    const nx=BOARD_R,ny=BOARD_Y-42;
+    if(dragging){
+      drawJellyfish(nextJelly,dragX,dragY);
+      drawJellyfish(nextJelly,nx,ny,0.22);
+    } else {
+      drawJellyfish(nextJelly,nx,ny);
+      ctx.fillStyle='rgba(0,220,200,0.45)'; ctx.font='13px Arial'; ctx.textAlign='center';
+      ctx.fillText(ammo>0?'Нажми куда угодно и прицелься':'',BOARD_R,ny-nextJelly.rx-14);
+    }
+  }
+  drawAmmoBar();
+  drawScoreTexts();
+}
+
+function loop(){physics();draw();requestAnimationFrame(loop);}
+
+// ---- INPUT ----
+canvas.addEventListener('mousedown',e=>{
+  if(!nextJelly||tasksDone||roundStarting) return;
+  dragging=true; dragX=e.clientX; dragY=e.clientY;
+});
+canvas.addEventListener('mousemove',e=>{ if(dragging){dragX=e.clientX;dragY=e.clientY;} });
+canvas.addEventListener('mouseup',e=>{ if(dragging) shoot(e.clientX,e.clientY); });
+canvas.addEventListener('touchstart',e=>{
+  if(!nextJelly||tasksDone||roundStarting) return;
+  dragging=true; dragX=e.touches[0].clientX; dragY=e.touches[0].clientY; e.preventDefault();
+},{passive:false});
+canvas.addEventListener('touchmove',e=>{ if(dragging){dragX=e.touches[0].clientX;dragY=e.touches[0].clientY;e.preventDefault();}},{passive:false});
+canvas.addEventListener('touchend',e=>{ if(dragging){shoot(e.changedTouches[0].clientX,e.changedTouches[0].clientY);e.preventDefault();}},{passive:false});
+
+// Ammo recharge: continuously restores one shot every (AMMO_RECHARGE_MS/AMMO_MAX) ms
+function startAmmoRecharge(){
+  if(ammoRechargeTimer) return; // already running
+  ammoRechargeTimer=setInterval(()=>{
+    if(ammo<AMMO_MAX){
+      ammo++;
+    }
+    if(ammo>=AMMO_MAX){
+      clearInterval(ammoRechargeTimer);
+      ammoRechargeTimer=null;
+    }
+  }, AMMO_RECHARGE_MS/AMMO_MAX);
+}
+
+function shoot(tx,ty){
+  if(!dragging||!nextJelly||tasksDone||roundStarting||ammo<=0){dragging=false;return;}
+  dragging=false;
+  const sx=BOARD_R,sy=BOARD_Y-42;
+  const dx=tx-sx,dy=ty-sy,mag=Math.sqrt(dx*dx+dy*dy);
+  if(mag<10) return;
+  const spd=Math.min(mag*0.13,16);
+  const nx=dx/mag,ny=dy/mag;
+  if(ny<-0.08) return;
+  const nrx=jellyRx(nextJelly.level),nry=jellyRy(nextJelly.level);
+  jellies.push({level:nextJelly.level,x:sx,y:sy,rx:nrx,ry:nry,vx:nx*spd,vy:ny*spd,wobble:0,wobbleV:0.25,energy:1.0,escaping:false,alpha:1});
+  ammo=Math.max(0,ammo-1);
+  startAmmoRecharge();
+  makeNextJelly();
+}
+
+// Block dragging when ammo empty
+canvas.addEventListener('mousedown',e=>{ if(ammo<=0) dragging=false; },true);
+
+resize(); initRound(); loop();
+</script>
+</body>
+</html>
