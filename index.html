@@ -85,6 +85,7 @@ function resize(){
   BOARD_W=Math.min(460,W-40); BOARD_X=W/2-BOARD_W/2;
   BOARD_Y=70; BOARD_H=H-90; BOARD_R=W/2;
   makeDecorations();
+  makeCorals();
 }
 window.addEventListener('resize',resize);
 
@@ -186,6 +187,29 @@ const AMMO_MAX=7;
 const AMMO_RECHARGE_MS=4200;
 let ammo=AMMO_MAX;
 let ammoRechargeTimer=null;
+
+// ---- CORAL SHOP ----
+let scoreFlashRed=0; // countdown frames for red flash
+let corals=[]; // placed coral objects with purchase state
+
+function makeCorals(){
+  // 6 corals: 3 left side, 3 right side
+  // Each has: x,y,w,h, price, bought, buyAnim(0..1), shape seed
+  const leftX=BOARD_X-100;
+  const rightX=BOARD_X+BOARD_W+50;
+  const prices=[2000,5000,15000,25000,40000,100000];
+  const shapes=['branch','fan','mushroom','tube','star','brain'];
+  corals=[
+    // Left column (3)
+    {x:leftX,    y:BOARD_Y+BOARD_H*0.55, w:130,h:160, price:prices[0],shape:shapes[0],seed:1,  bought:false,anim:0,particles:[]},
+    {x:leftX-20, y:BOARD_Y+BOARD_H*0.28, w:150,h:170, price:prices[2],shape:shapes[2],seed:3,  bought:false,anim:0,particles:[]},
+    {x:leftX-10, y:BOARD_Y+BOARD_H*0.02, w:140,h:155, price:prices[4],shape:shapes[4],seed:5,  bought:false,anim:0,particles:[]},
+    // Right column (3)
+    {x:rightX,   y:BOARD_Y+BOARD_H*0.55, w:130,h:160, price:prices[1],shape:shapes[1],seed:2,  bought:false,anim:0,particles:[]},
+    {x:rightX+10,y:BOARD_Y+BOARD_H*0.28, w:145,h:165, price:prices[3],shape:shapes[3],seed:4,  bought:false,anim:0,particles:[]},
+    {x:rightX,   y:BOARD_Y+BOARD_H*0.02, w:150,h:170, price:prices[5],shape:shapes[5],seed:6,  bought:false,anim:0,particles:[]},
+  ];
+}
 
 function makeDecorations(){
   decorations=[];
@@ -442,13 +466,12 @@ function drawJellyfish(j,ox,oy,alpha){
 
 function drawAimLine(){
   if(!dragging||!nextJelly) return;
-  const sx=BOARD_R,sy=BOARD_Y-42;
-  const dx=dragX-sx,dy=dragY-sy,mag=Math.sqrt(dx*dx+dy*dy);
-  if(mag<8) return;
-  const nx=dx/mag,ny=dy/mag;
+  // Aim is strictly vertical from jelly position down into board
+  const sx=Math.max(BOARD_X+10, Math.min(BOARD_X+BOARD_W-10, dragX));
+  const sy=BOARD_Y-42;
   ctx.setLineDash([8,8]); ctx.strokeStyle='rgba(0,220,200,0.5)'; ctx.lineWidth=1.5;
   ctx.beginPath(); ctx.moveTo(sx,sy);
-  for(let i=1;i<=12;i++) ctx.lineTo(sx+nx*i*28,sy+ny*i*28);
+  ctx.lineTo(sx, BOARD_Y+BOARD_H);
   ctx.stroke(); ctx.setLineDash([]);
 }
 
@@ -466,6 +489,8 @@ function drawScoreTexts(){
 
 function physics(){
   waveT+=0.011;
+  updateCorals();
+  updateScoreColor();
   // Advance danger line animation (~16ms per frame at 60fps)
   if(dangerAnimFrom!==null && dangerAnimT<DANGER_ANIM_DUR) dangerAnimT+=16;
   decorations.forEach(d=>{ if(d.type==='fish') updateFish(d); });
@@ -637,6 +662,167 @@ function resetLevel(){
   },900);
 }
 
+// ---- CORAL DRAWING ----
+// Seeded pseudo-random for consistent shape per coral
+function seededRand(seed,n){ let x=Math.sin(seed*9301+n*49297+233)*93432; return x-Math.floor(x); }
+
+function drawCoralShadow(c){
+  const {x,y,w,h,shape,seed,price}=c;
+  ctx.save();
+  // Shadow silhouette — dark teal shape, no color
+  ctx.globalAlpha=0.55;
+  drawCoralShape(ctx,x,y,w,h,shape,seed,'rgba(0,40,50,0.9)',null);
+  // Price label
+  ctx.globalAlpha=0.85;
+  ctx.fillStyle='rgba(180,240,230,0.75)';
+  ctx.font='bold 13px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  const cx=x+(shape==='branch'||shape==='fan'||shape==='mushroom'?-w*0.1:w*0.1);
+  ctx.fillText(price.toLocaleString(),cx,y+h*0.5+18);
+  ctx.restore();
+}
+
+function drawCoralBought(c){
+  const {x,y,w,h,shape,seed,anim}=c;
+  ctx.save();
+  // Animated buy flash — expand + fade in
+  const scale=0.85+anim*0.15;
+  ctx.globalAlpha=Math.min(1,anim*2);
+  ctx.translate(x+w*0.1,y+h*0.5);
+  ctx.scale(scale,scale);
+  ctx.translate(-(x+w*0.1),-(y+h*0.5));
+  // Colorful coral
+  const hue=shape==='branch'?10:shape==='fan'?330:shape==='mushroom'?160:shape==='tube'?200:shape==='star'?40:280;
+  const grad=`hsl(${hue},85%,55%)`;
+  const grad2=`hsl(${hue+30},90%,70%)`;
+  drawCoralShape(ctx,x,y,w,h,shape,seed,grad,grad2);
+  // Sparkle particles on buy
+  if(anim<0.6 && c.particles.length>0){
+    c.particles.forEach(p=>{
+      ctx.globalAlpha=p.life; ctx.fillStyle=p.color;
+      ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    });
+  }
+  ctx.restore();
+}
+
+function drawCoralShape(ctx,x,y,w,h,shape,seed,fill,fill2){
+  const cx=x, cy=y, sr=seededRand;
+  ctx.fillStyle=fill;
+  if(shape==='branch'){
+    // Branching tree
+    function branch(bx,by,len,ang,depth){
+      if(depth<0||len<4) return;
+      const ex=bx+Math.cos(ang)*len, ey=by-Math.sin(ang)*len;
+      ctx.lineWidth=Math.max(1.5,depth*2.5);
+      ctx.strokeStyle=fill;
+      ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(ex,ey); ctx.stroke();
+      if(fill2&&depth>1){ ctx.strokeStyle=fill2; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(bx+1,by); ctx.lineTo(ex+1,ey); ctx.stroke();}
+      branch(ex,ey,len*0.68,ang+0.5+sr(seed,depth*3)*0.3,depth-1);
+      branch(ex,ey,len*0.65,ang-0.5-sr(seed,depth*4)*0.3,depth-1);
+    }
+    branch(cx,cy+h*0.5,h*0.45,Math.PI/2,5);
+  } else if(shape==='fan'){
+    // Fan/plate coral
+    for(let i=0;i<8;i++){
+      const ang=-0.8+i*0.22+sr(seed,i)*0.1;
+      const r=h*0.35+sr(seed,i+10)*h*0.15;
+      ctx.beginPath();
+      ctx.ellipse(cx,cy+h*0.3,r*0.12,r,ang,0,Math.PI*2);
+      ctx.fill();
+      if(fill2){ctx.fillStyle=fill2; ctx.beginPath(); ctx.ellipse(cx+1,cy+h*0.3,r*0.05,r*0.7,ang,0,Math.PI*2); ctx.fill(); ctx.fillStyle=fill;}
+    }
+  } else if(shape==='mushroom'){
+    // Rounded mushroom cap + stem
+    ctx.beginPath(); ctx.ellipse(cx,cy+h*0.2,w*0.38,h*0.28,0,0,Math.PI*2); ctx.fill();
+    if(fill2){ctx.fillStyle=fill2; ctx.beginPath(); ctx.ellipse(cx,cy+h*0.1,w*0.22,h*0.15,0,0,Math.PI*2); ctx.fill(); ctx.fillStyle=fill;}
+    ctx.beginPath(); ctx.roundRect(cx-w*0.06,cy+h*0.25,w*0.12,h*0.3,4); ctx.fill();
+    // Polka dots
+    if(fill2){ctx.fillStyle=fill2; for(let i=0;i<5;i++){ctx.beginPath(); ctx.arc(cx-w*0.18+sr(seed,i+20)*w*0.36,cy+h*0.1+sr(seed,i+30)*h*0.18,4+sr(seed,i)*4,0,Math.PI*2); ctx.fill();} ctx.fillStyle=fill;}
+  } else if(shape==='tube'){
+    // Tube/pipe corals
+    for(let i=0;i<5;i++){
+      const tx=cx-w*0.22+i*w*0.11, th=h*(0.3+sr(seed,i)*0.35);
+      ctx.beginPath(); ctx.roundRect(tx-5,cy+h*0.5-th,10,th,5); ctx.fill();
+      if(fill2){ctx.fillStyle=fill2; ctx.beginPath(); ctx.ellipse(tx,cy+h*0.5-th,6,4,0,0,Math.PI*2); ctx.fill(); ctx.fillStyle=fill;}
+    }
+  } else if(shape==='star'){
+    // Spiky star burst
+    for(let i=0;i<12;i++){
+      const ang=(i/12)*Math.PI*2, r=h*(0.2+sr(seed,i+40)*0.2);
+      const ex=cx+Math.cos(ang)*r, ey=cy+h*0.3+Math.sin(ang)*r*0.5;
+      ctx.lineWidth=3+sr(seed,i)*4; ctx.strokeStyle=fill;
+      ctx.beginPath(); ctx.moveTo(cx,cy+h*0.3); ctx.lineTo(ex,ey); ctx.stroke();
+      if(fill2&&i%2===0){ctx.lineWidth=1.5; ctx.strokeStyle=fill2; ctx.beginPath(); ctx.moveTo(cx,cy+h*0.3); ctx.lineTo(ex,ey); ctx.stroke();}
+    }
+  } else {
+    // Brain coral — concentric wavy ridges
+    for(let ring=0;ring<6;ring++){
+      const r=w*(0.07+ring*0.05), ry=h*(0.05+ring*0.035);
+      ctx.beginPath();
+      for(let a=0;a<Math.PI*2;a+=0.15){
+        const wave=Math.sin(a*4+seed)*4;
+        const px=cx+Math.cos(a)*(r+wave), py=cy+h*0.3+Math.sin(a)*(ry+wave*0.5);
+        ring===0&&a<0.16?ctx.moveTo(px,py):ctx.lineTo(px,py);
+      }
+      ctx.closePath(); ctx.lineWidth=2.5; ctx.strokeStyle=fill; ctx.stroke();
+      if(fill2&&ring%2===0){ctx.lineWidth=1; ctx.strokeStyle=fill2; ctx.stroke();}
+    }
+  }
+}
+
+function tryBuyCoral(mx,my){
+  corals.forEach(c=>{
+    if(c.bought) return;
+    // Hit test: rough bounding box around coral center
+    const cx=c.x+(c.shape==='branch'||c.shape==='fan'||c.shape==='mushroom'?-c.w*0.1:c.w*0.1);
+    const cy=c.y+c.h*0.5;
+    if(Math.abs(mx-cx)<c.w*0.55&&Math.abs(my-cy)<c.h*0.55){
+      if(score>=c.price){
+        score-=c.price;
+        document.getElementById('score').textContent=score;
+        c.bought=true; c.anim=0;
+        // Spawn sparkle particles
+        for(let i=0;i<22;i++){
+          const ang=Math.random()*Math.PI*2, spd=2+Math.random()*4;
+          const hue=Math.floor(Math.random()*360);
+          c.particles.push({x:cx,y:cy,vx:Math.cos(ang)*spd,vy:Math.sin(ang)*spd,life:1,r:2+Math.random()*4,color:`hsl(${hue},90%,65%)`});
+        }
+      } else {
+        // Flash score red
+        scoreFlashRed=120; // ~2 sec at 60fps
+      }
+    }
+  });
+}
+
+function updateCorals(){
+  corals.forEach(c=>{
+    if(c.bought && c.anim<1) c.anim=Math.min(1,c.anim+0.011); // ~1.5s to fill
+    if(c.particles.length){
+      c.particles.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=0.1;p.life-=0.022;});
+      c.particles=c.particles.filter(p=>p.life>0);
+    }
+  });
+  if(scoreFlashRed>0) scoreFlashRed--;
+}
+
+function drawCorals(){
+  corals.forEach(c=>{
+    if(!c.bought) drawCoralShadow(c);
+    else drawCoralBought(c);
+  });
+}
+
+function updateScoreColor(){
+  const el=document.getElementById('score-box');
+  if(scoreFlashRed>0){
+    const flash=Math.sin(scoreFlashRed*0.25)>0;
+    el.style.color=flash?'#ff4444':'#7ef5ee';
+  } else {
+    el.style.color='#7ef5ee';
+  }
+}
+
 function drawDangerLine(){
   const dangerY=getDangerY();
   const isAnimating=dangerAnimFrom!==null && dangerAnimT<DANGER_ANIM_DUR;
@@ -720,6 +906,7 @@ function drawAmmoBar(){
 function draw(){
   ctx.clearRect(0,0,W,H);
   drawBg();
+  drawCorals();
   decorations.forEach(d=>{
     if(d.type==='seaweed') drawSeaweed(d);
     else if(d.type==='starfish') drawStarfish(d);
@@ -734,12 +921,15 @@ function draw(){
   ctx.restore();
 
   if(nextJelly&&!tasksDone&&!roundStarting){
-    const nx=BOARD_R,ny=BOARD_Y-42;
+    // Jelly X follows cursor horizontally, clamped inside board
+    const jellyX=dragging
+      ? Math.max(BOARD_X+nextJelly.rx+4, Math.min(BOARD_X+BOARD_W-nextJelly.rx-4, dragX))
+      : BOARD_R;
+    const ny=BOARD_Y-42;
     if(dragging){
-      drawJellyfish(nextJelly,dragX,dragY);
-      drawJellyfish(nextJelly,nx,ny,0.22);
+      drawJellyfish(nextJelly,jellyX,ny);
     } else {
-      drawJellyfish(nextJelly,nx,ny);
+      drawJellyfish(nextJelly,jellyX,ny);
       ctx.fillStyle='rgba(0,220,200,0.45)'; ctx.font='13px Arial'; ctx.textAlign='center';
       ctx.fillText(ammo>0?'Нажми куда угодно и прицелься':'',BOARD_R,ny-nextJelly.rx-14);
     }
@@ -752,12 +942,15 @@ function loop(){physics();draw();requestAnimationFrame(loop);}
 
 // ---- INPUT ----
 canvas.addEventListener('mousedown',e=>{
+  // Check coral purchase first
+  tryBuyCoral(e.clientX, e.clientY);
   if(!nextJelly||tasksDone||roundStarting) return;
   dragging=true; dragX=e.clientX; dragY=e.clientY;
 });
 canvas.addEventListener('mousemove',e=>{ if(dragging){dragX=e.clientX;dragY=e.clientY;} });
 canvas.addEventListener('mouseup',e=>{ if(dragging) shoot(e.clientX,e.clientY); });
 canvas.addEventListener('touchstart',e=>{
+  tryBuyCoral(e.touches[0].clientX, e.touches[0].clientY);
   if(!nextJelly||tasksDone||roundStarting) return;
   dragging=true; dragX=e.touches[0].clientX; dragY=e.touches[0].clientY; e.preventDefault();
 },{passive:false});
@@ -781,14 +974,12 @@ function startAmmoRecharge(){
 function shoot(tx,ty){
   if(!dragging||!nextJelly||tasksDone||roundStarting||ammo<=0){dragging=false;return;}
   dragging=false;
-  const sx=BOARD_R,sy=BOARD_Y-42;
-  const dx=tx-sx,dy=ty-sy,mag=Math.sqrt(dx*dx+dy*dy);
-  if(mag<10) return;
-  const spd=Math.min(mag*0.13,16);
-  const nx=dx/mag,ny=dy/mag;
-  if(ny<-0.08) return;
+  // Spawn at cursor X (clamped to board), shoot straight down
+  const sx=Math.max(BOARD_X+jellyRx(nextJelly.level)+4, Math.min(BOARD_X+BOARD_W-jellyRx(nextJelly.level)-4, tx));
+  const sy=BOARD_Y-42;
+  const spd=14;
   const nrx=jellyRx(nextJelly.level),nry=jellyRy(nextJelly.level);
-  jellies.push({level:nextJelly.level,x:sx,y:sy,rx:nrx,ry:nry,vx:nx*spd,vy:ny*spd,wobble:0,wobbleV:0.25,energy:1.0,escaping:false,alpha:1});
+  jellies.push({level:nextJelly.level,x:sx,y:sy,rx:nrx,ry:nry,vx:0,vy:spd,wobble:0,wobbleV:0.25,energy:1.0,escaping:false,alpha:1});
   ammo=Math.max(0,ammo-1);
   startAmmoRecharge();
   makeNextJelly();
